@@ -60,6 +60,11 @@ pip install opencv-python mss Pillow numpy pyautogui keyboard
 python fishing_tool.py
 ```
 
+或者使用打包好的 `exe` 文件运行，无需安装环境，但仍需准备以下模板文件：
+
+* `pointer_template.png` 👉 指针图案截图（小三角指针）
+* `bite_template.png` 👉 咬钩提示截图（感叹号/头像 UI）
+
 首次运行时：
 
 * 默认指针区域为：
@@ -98,11 +103,11 @@ python fishing_tool.py
 
 ---
 
-## ⚙�� 参数说明
+## ⚙程序参数说明
 
 在 UI 界面中可以调节以下参数：
 
-### ����前参数
+### 上钩前参数
 
 * **cast\_hold\_time**：抛竿按住时长（秒），默认 `3.0`
 * **post\_cast\_wait**：抛竿后等待的间隔（秒），默认 `0.5`
@@ -114,14 +119,14 @@ python fishing_tool.py
 
 ### 收杆时参数
 
-* **pointer\_loss\_time**：指针丢失判定时间（秒），默认 `0.2`
+* **pointer\_loss\_time**：指针丢失判定时间（秒），默认 `0.2`（程序通过张力指针来判断是否处于收杆状态）
 * **release\_angle**：当角度小于该值时松开，默认 `60`
 * **release\_speed**：指针移动速度超过该值时松开，默认 `10`
 
 ### 收杆后参数
 
-* **reel\_end\_wait**：收杆结束后的等待时间（���），默认 `1.8`
-* **short\_press\_time**：收杆结束后短按鼠标的时间（秒），默认 `0.2`
+* **reel\_end\_wait**：收杆结束后的等待时间（收杆结束要等待手里拿鱼的过程），默认 `1.8`
+* **short\_press\_time**：收杆结束后短按鼠标的时间（秒）（因为需要取消拿鱼的状态），默认 `0.2`
 * **next\_cast\_sleep**：进入下一轮抛竿前的等待时间（秒），默认 `2.0`
 
 ---
