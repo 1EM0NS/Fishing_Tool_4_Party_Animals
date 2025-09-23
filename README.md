@@ -15,6 +15,7 @@
 
 <div align="center">
   <video src="fishing.mp4" controls width="70%"></video>
+  <p>如果视频无法播放，请<a href="github_dist/fishing.mp4" download>点击这里下载</a>。</p>
 </div>
 
 ---
