@@ -3,7 +3,7 @@
 ![展示图片](github_dist/show.png)
 
 这是一个专门针面对 **《猛兽派对（Party Animals）》钓鱼模式** 的自动化辅助工具。
-程序基于 **Python + OpenCV + Tkinter**，通过屏幕截图识别 UI（指针、感叹号提示）并模拟鼠标操作，实���自动抛竿、检测咬钩、收杆等功能。
+程序基于 **Python + OpenCV + Tkinter**，通过屏幕截图识别 UI（指针、感叹号提示）并模拟鼠标操作，实现自动抛竿、检测咬钩、收杆等功能。
 
 ⚠️ 声明：
 本工具仅用于学习与研究 **图像处理与自动化控制**。
@@ -11,7 +11,15 @@
 
 ---
 
-## ✨ ���能特点
+## 🎥 视频演示
+
+<div align="center">
+  <video src="fishing.mp4" controls width="70%"></video>
+</div>
+
+---
+
+## ✨ 功能特点
 
 <div align="center">
   <img src="github_dist/software.png" alt="软件界面" width="50%">

@@ -14,11 +14,6 @@ fishing_tool.py
      3: 立即停止自动化 (紧急停止)
  - UI 上也有按钮控制与参数输入
 
-使用说明:
- - 修改 region 变量为你的进度条区域 (你已提供):
-     region = {"top": 1010, "left": 1370, "width": 400, "height": 200}
- - 首次运行可用 "Set Bite Region" 手动框选 感叹号/头像区域（可选）。
- - 调整阈值后点击 "Start Detect" 查看效������
 """
 
 import tkinter as tk
@@ -36,7 +31,7 @@ pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.01
 
 # ---------- 初始参数 (你可以在 UI 中调整) ----------
-# 指针检测���域
+# 指针检测区域
 pointer_region = {"top": 1010, "left": 1370, "width": 400, "height": 200}
 bite_region = {"top": 300, "left": 1400, "width": 300, "height": 300}  # 感叹号区域
 # HSV 颜色阈值（根据你给的 HSV: H≈18 S≈214 V≈255）
@@ -61,15 +56,15 @@ params = {
 FRAME_INTERVAL_MS = 50  # UI 刷新间隔 (ms)
 
 # ---------- 全局状态 ----------
-running_detection = False      # 是否在检��（UI 刷新）
+running_detection = False      # 是否在检测（UI 刷新）
 automation_running = False     # 自动钓鱼循环是否在运行
 bite_mode_manual = False       # 手动触发“有鱼” (按2会切换 / 触发)
-stop_requested = False         # 请求停止自动化线���
+stop_requested = False         # 请求停止自动化线程
 last_action_text = "Idle"
 
 sct = mss.mss()
 
-# ---------- 图像处理与���针检测 ----------
+# ---------- 图像处理与指针检测 ----------
 def rotate_image(img, angle):
     """旋转图像，不裁剪内容，返回旋转后的图像"""
     h, w = img.shape[:2]
@@ -143,9 +138,7 @@ def detect_pointer_angle_and_annotate(bgr_img, ui_handle=None):
 
 # ---------- Region 选择工具 (OpenCV 窗口, 拖动框选) ----------
 def select_region_via_drag():
-    """
-    ��出一个截图窗口，允����������标拖���选择矩形区域������回 region dict 或 None�������
-    """
+
     monitor = sct.monitors[1]
     img = np.array(sct.grab(monitor))[:, :, :3]
     clone = img.copy()
@@ -189,7 +182,7 @@ def select_region_via_drag():
         return None
     return {"top": top, "left": left, "width": width, "height": height}
 
-# ---------- 自动钓���逻辑 (线程执行) ----------
+# ---------- 自动钓鱼逻辑 (线程执行) ----------
 def automation_loop(ui_handle):
     """
     自动钓鱼主循环：
@@ -315,7 +308,7 @@ def automation_loop(ui_handle):
                     last_time = now
 
                 if pointer_lost:
-                    # 收杆循环结束后，等待 params["reel_end_wait"] 秒，短按左键 params["short_press_time"] 秒，再立即进入下一轮���竿
+                    # 收杆循环结束后，等待 params["reel_end_wait"] 秒，短按左键 params["short_press_time"] 秒，再立即进入下一轮抛竿
                     time.sleep(params["reel_end_wait"])
                     print(f"收杆结束后短按左键{params['short_press_time']}秒")
                     pyautogui.mouseDown()
@@ -328,7 +321,7 @@ def automation_loop(ui_handle):
                 if no_pointer_time is not None and (now - no_pointer_time > 1.0):
                     break
 
-            # 小暂停后��入下一轮
+            # 小暂停后进入下一轮
             time.sleep(1.0)
 
     except Exception as e:
@@ -471,7 +464,7 @@ class FishingUI:
             self._loop_detect()
 
     def sync_params_from_entries(self):
-        # ��� UI entries 写回 params
+        # UI entries 写回 params
         for name, ent in self.entries.items():
             try:
                 val = float(ent.get()) if '.' in ent.get() else int(ent.get())
@@ -520,15 +513,15 @@ class FishingUI:
             pointer_region = new_region
             messagebox.showinfo("成功", f"指针区域已更新为: {pointer_region}")
         else:
-            messagebox.showwarning("���消", "未更新指针区域")
+            messagebox.showwarning("取消", "未更新指针区域")
 
     def set_bite_region(self):
-        """设置咬���检测区域"""
+        """设置咬钩检测区域"""
         global bite_region
         new_region = select_region_via_drag()
         if new_region:
             bite_region = new_region
-            messagebox.showinfo("成��", f"咬钩区域已更新为: {bite_region}")
+            messagebox.showinfo("成功", f"咬钩区域已更新为: {bite_region}")
         else:
             messagebox.showwarning("取消", "未更新咬钩区域")
 
@@ -538,13 +531,13 @@ class FishingUI:
         frame = np.array(sct.grab(pointer_region))[:, :, :3]
         angle, annotated, mask = detect_pointer_angle_and_annotate(frame, ui_handle=self)
 
-        # ���钩检测可视化
+        # 咬钩检测可视化
         bite_frame = np.array(sct.grab(bite_region))[:, :, :3]
         bite_frame = cv2.cvtColor(bite_frame, cv2.COLOR_BGRA2BGR)  # 确保为 BGR 格式
         gray_bite = cv2.cvtColor(bite_frame, cv2.COLOR_BGR2GRAY)
         bite_template = cv2.imread("bite_template.png", cv2.IMREAD_GRAYSCALE)
         if bite_template is not None:
-            # ���模板进行多级缩放处理
+            # 咬钩模板进行多级缩放处理
             scaled_templates = [
                 cv2.resize(bite_template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
                 for scale in np.arange(0.5, 3.5, 0.5)  # 从 50% 到 300%，每 50% 一个模板
@@ -624,10 +617,10 @@ def main():
     app = FishingUI(root)
     # show quick hint
     message = ("提示：\n"
-               " - 按��� '1' 启动/停止自动钓鱼 (也可点击启动自动钓鱼)\n"
+               " - 按键 '1' 启动/停止自动钓鱼 (也可点击启动自动钓鱼)\n"
                " - 按键 '2' 手动触发“有鱼”事件（会被自动钓鱼线程消费）\n"
                " - 按键 '3' 立即停止自动钓鱼\n"
-               " - 如果需要自动检���感叹号（咬钩），请用“设置咬钩区域”选区并将模板命名为 bite_template.png\n"
+               " - 如果需要自动检测感叹号（咬钩），请用“设置咬钩区域”选区并将模板命名为 bite_template.png\n"
                " - 调节参数后建议先“开始检测”观察识别效果，再启用自动钓鱼\n")  # 全部改为中文
     print(message)
     root.mainloop()
