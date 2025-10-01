@@ -3,17 +3,6 @@ fishing_tool.py
 
 依赖:
     pip install opencv-python mss Pillow numpy pyautogui keyboard
-
-功能:
- - 实时显示 region 区域 (progress area) 与 HSV 掩膜
- - 检测圆角三角指针 (使用颜色 + minEnclosingTriangle)
- - 显示 angle / speed，调节策略参数（速度阈值、短按/长按时长等）
- - 键盘:
-     1: 启动/停止自动钓鱼循环 (Start/Stop automation)
-     2: 切换“有鱼检测/手动标记有鱼”模式 (当按下2时，立刻认为有鱼并触发收杆)
-     3: 立即停止自动化 (紧急停止)
- - UI 上也有按钮控制与参数输入
-
 """
 
 import tkinter as tk
@@ -41,15 +30,22 @@ UPPER_ORANGE = np.array([28, 255, 255])
 # 自动钓鱼策略默认参数
 params = {
     "cast_hold_time": 3.0,       # 抛竿按住时长 (秒)
-    "post_cast_wait": 0.5,       # 抛竿后等待的微小间隔
-    "bite_threshold": 0.78,      # 上钩模板匹配阈值
+    "post_cast_wait": 0.5,       # 抛竿后等待的微小间隔    # 上钩模板匹配阈值
     "max_bite_wait": 30,         # 等待上钩的最大时间 (秒)
     "pointer_loss_time": 0.2,    # 未检测到指针的时间 (秒)
     "release_angle": 60,         # 角度小于多少就松开
-    "release_speed": 10,         # 速度超过多少就松开
+    "release_speed": 8,          # 速度超过多少就松开
     "reel_end_wait": 1.8,        # 收杆循环结束等待时间 (秒)
     "short_press_time": 0.2,     # 收杆结束后的短按时间 (秒)
-    "next_cast_sleep": 2.0       # 开始下一轮抛竿的睡眠时间 (秒)
+    "next_cast_sleep": 2.0,     # 开始下一轮抛竿的睡眠时间 (秒)
+    "bite_diff_threshold": 5,   # 像素均值差阈值
+    "bite_confirm_frames": 1,    # 连续多少帧变化才算真正咬钩
+    "cast_adjust_a_time": 0.25,    # 抛竿时最后一段按A的时长 (秒)
+    "max_reel_time": 29,        # 收杆的最大时长 (秒)，超过强制认为失败
+    "post_fail_cooldown": 4.0,  # 鱼跑后冷却时间 (秒)
+    "bite_rearm_delay": 4.0,  # ⬅️ 新增：收杆成功后的禁止检测时长(秒)
+    "bite_arm_after_cast_delay": 4.0,  # ⬅️ 新增：抛竿完成后多久内不允许判定咬钩(秒)
+
 }
 
 # 其它
@@ -61,7 +57,9 @@ automation_running = False     # 自动钓鱼循环是否在运行
 bite_mode_manual = False       # 手动触发“有鱼” (按2会切换 / 触发)
 stop_requested = False         # 请求停止自动化线程
 last_action_text = "Idle"
-
+bite_detection_enabled = False   # 是否允许检测咬钩
+last_reel_success_time = 0.0     # ⬅️ 新增：上次“收杆成功”的时间
+last_cast_time = 0.0             # ⬅️ 新增：上次“抛竿完成”的时间
 sct = mss.mss()
 
 # ---------- 图像处理与指针检测 ----------
@@ -140,7 +138,8 @@ def detect_pointer_angle_and_annotate(bgr_img, ui_handle=None):
 def select_region_via_drag():
 
     monitor = sct.monitors[1]
-    img = np.array(sct.grab(monitor))[:, :, :3]
+    img = np.array(sct.grab(monitor))[:, :, :3].copy()
+
     clone = img.copy()
     window_name = "拖动选择区域 - 按回车确认，ESC取消"  # 原英文改为中文
 
@@ -182,15 +181,58 @@ def select_region_via_drag():
         return None
     return {"top": top, "left": left, "width": width, "height": height}
 
+
+
+
+last_bite_gray = None
+bite_change_count = 0
+
+def detect_bite_change(sct_thread):
+    global last_bite_gray, bite_change_count,last_reel_success_time, last_cast_time
+
+    if not bite_detection_enabled:
+        return False  # 🚫 如果不在“等待咬钩阶段”，直接不检测
+        # 两个时间窗：收杆成功后的冷却 & 抛竿完成后的短暂屏蔽
+
+    now = time.time()
+    if (now - last_reel_success_time) < params["bite_rearm_delay"]:
+        return False
+    if (now - last_cast_time) < params["bite_arm_after_cast_delay"]:
+        return False
+
+    frame = np.array(sct_thread.grab(bite_region))[:, :, :3].copy()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    if last_bite_gray is None:
+        last_bite_gray = gray
+        return False
+
+    diff = cv2.absdiff(last_bite_gray, gray)
+    score = np.mean(diff)
+    last_bite_gray = gray
+
+    # ✅ 只在超过阈值时打印，避免刷屏
+    if score > params["bite_diff_threshold"]:
+        print(f"[咬钩检测] diff_score={score:.2f} > 阈值{params['bite_diff_threshold']}")
+
+        bite_change_count += 1
+    else:
+        bite_change_count = 0
+
+    return bite_change_count >= params["bite_confirm_frames"]
+
+
+
+
 # ---------- 自动钓鱼逻辑 (线程执行) ----------
 def automation_loop(ui_handle):
     """
     自动钓鱼主循环：
-    - 抛竿（按住 cast_hold_time）
-    - 自动通过 bite_region 和模板匹配检测是否咬钩
-    - 收杆：实时速度监控
+    - 抛竿（按住 cast_hold_time，支持尾段按A校正）
+    - 等待咬钩（数字差分）
+    - 收杆：实时控制；仅“超时”视为失败 → 冷却；指针丢失仍视为成功
     """
-    global automation_running, stop_requested, last_action_text
+    global automation_running, stop_requested, last_action_text, last_bite_gray, bite_change_count, bite_detection_enabled,last_cast_time, last_reel_success_time
     sct_thread = mss.mss()
 
     automation_running = True
@@ -203,83 +245,92 @@ def automation_loop(ui_handle):
             last_action_text = "Casting (hold mouse)"
             ui_handle.set_last_action(last_action_text)
             pyautogui.mouseDown()
-            time.sleep(params["cast_hold_time"])
+
+            # 抛竿末段按A校正（如未配置则整段仅按住鼠标）
+            if params.get("cast_adjust_a_time", 0) > 0:
+                pre_wait = params["cast_hold_time"] - params["cast_adjust_a_time"]
+                if pre_wait > 0:
+                    time.sleep(pre_wait)
+                pyautogui.keyDown('a')
+                time.sleep(params["cast_adjust_a_time"])
+                pyautogui.keyUp('a')
+            else:
+                time.sleep(params["cast_hold_time"])
+
             pyautogui.mouseUp()
             time.sleep(params["post_cast_wait"])
+            # ✅ 开启咬钩检测
+            last_cast_time = time.time()  # ⬅️ 新增
+            bite_detection_enabled = True
 
-            # 2) 等待有鱼
+            # 2) 等待咬钩（数字变化）
             last_action_text = "Waiting for bite..."
             ui_handle.set_last_action(last_action_text)
+            timeout_happened = False  # ⬅️ 在这里初始化（每一轮都重置一次）
             start_wait = time.time()
             bite_detected = False
 
             while not stop_requested and not bite_detected:
-                # 自动检测咬钩
-                img = np.array(sct_thread.grab(bite_region))[:, :, :3]
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                bite_template = cv2.imread("bite_template.png", cv2.IMREAD_GRAYSCALE)
-                if bite_template is None:
-                    raise FileNotFoundError("未找到咬钩模板文件 bite_template.png")
-
-                # 动态生成模板缩放范围
-                region_h, region_w = bite_region["height"], bite_region["width"]
-                tpl_h, tpl_w = bite_template.shape[:2]
-                max_scale = min(region_h / tpl_h, region_w / tpl_w)  # 缩放到检测区域的 100%
-                min_scale = max_scale * 0.25  # 当前大小的 25%
-                scaled_templates = [
-                    cv2.resize(bite_template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-                    for scale in np.linspace(min_scale, max_scale, 10)  # 等距取 10 份
-                ]
-
-                for tpl in scaled_templates:
-                    res = cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)
-                    if np.max(res) >= params["bite_threshold"]:  # 阈值可调
-                        bite_detected = True
-                        break
-                if bite_detected:
+                if detect_bite_change(sct_thread):
+                    bite_detected = True
+                    print("检测到鱼饵变化 → 判定咬钩！")
+                    # 进入收杆前重置状态，避免重复触发
+                    last_bite_gray = None
+                    bite_change_count = 0
+                    # ✅ 一旦进入收杆，关闭咬钩检测，避免误触发
+                    bite_detection_enabled = False
                     break
 
-                # 如果等待超过 params["max_bite_wait"] 秒，重新抛竿
                 if time.time() - start_wait > params["max_bite_wait"]:
                     last_action_text = "No bite detected (timeout) - restarting"
                     ui_handle.set_last_action(last_action_text)
+
+                    # 🚫 关闭咬钩检测，避免在抛竿前误触发
+                    bite_detection_enabled = False
+                    timeout_happened = True  # ⬅️ 标记超时
                     time.sleep(1.0)
                     break
 
                 time.sleep(0.12)
+            # 这里判断
+            if timeout_happened:
+                continue  # ⬅️ 跳过收杆，直接重新进入抛竿
 
-            if stop_requested:
-                break
-            if not bite_detected:
-                continue
-
-            # 3) 收杆阶段：实时速度监控循环
+            # 3) 收杆阶段
             last_action_text = "Reeling: real-time speed monitor"
             ui_handle.set_last_action(last_action_text)
 
-            press_start = None
             last_angle = None
             last_time = None
             no_pointer_time = None
-            pointer_lost = False
+            pointer_lost = False          # 指针丢失 = 成功收杆
+            timed_out = False             # 仅此视为失败
+            reel_start = time.time()      # 收杆开始时间
 
             while not stop_requested:
                 print("收杆：按下")
                 pyautogui.mouseDown()
-                press_start = time.time()
                 released = False
 
                 while not stop_requested:
                     time.sleep(0.1)
-                    frame = np.array(sct_thread.grab(pointer_region))[:, :, :3]
+                    frame = np.array(sct_thread.grab(pointer_region))[:, :, :3].copy()
                     angle, _, _ = detect_pointer_angle_and_annotate(frame, ui_handle=ui_handle)
                     now = time.time()
 
+                    # --- 仅超时作为失败 ---
+                    if now - reel_start > params["max_reel_time"]:
+                        print(f"超过最大收杆时长 {params['max_reel_time']} 秒，判定失败")
+                        pyautogui.mouseUp()
+                        timed_out = True
+                        break
+
+                    # --- 指针检测：丢失=成功收杆(旧逻辑保持) ---
                     if angle is None:
                         if no_pointer_time is None:
                             no_pointer_time = now
                         elif now - no_pointer_time > params["pointer_loss_time"]:
-                            print(f"{params['pointer_loss_time']}秒内未检测到指针，收杆循环结束")
+                            print(f"{params['pointer_loss_time']} 秒内未检测到指针 → 视为收杆成功")
                             pyautogui.mouseUp()
                             pointer_lost = True
                             break
@@ -287,19 +338,21 @@ def automation_loop(ui_handle):
                     else:
                         no_pointer_time = None
 
+                    # --- 角度控制 ---
                     if angle < params["release_angle"] and not released:
-                        print(f"当前角度小于{params['release_angle']}度，松开2秒")
+                        print(f"当前角度 < {params['release_angle']} 度，松开 2 秒")
                         pyautogui.mouseUp()
                         released = True
                         time.sleep(2)
                         break
 
+                    # --- 速度控制 ---
                     if last_angle is not None and last_time is not None:
                         dt = now - last_time if now - last_time > 1e-6 else 1e-6
                         speed = abs(angle - last_angle) / dt
                         print(f"当前速度: {speed:.2f} 度/秒")
                         if speed >= params["release_speed"] and not released:
-                            print(f"速度超过{params['release_speed']}，松开0.1秒")
+                            print(f"速度 ≥ {params['release_speed']}，松开 0.1 秒")
                             pyautogui.mouseUp()
                             released = True
                             time.sleep(0.1)
@@ -307,15 +360,25 @@ def automation_loop(ui_handle):
                     last_angle = angle
                     last_time = now
 
+                # --- 收杆结束后的处理 ---
+                if timed_out:
+                    # 失败(仅超时) → 冷却 → 直接进入下一轮
+                    # 🚫 禁用咬钩检测，避免误触发
+                    bite_detection_enabled = False
+                    print(f"收杆超时，冷却 {params['post_fail_cooldown']} 秒后再抛竿")
+                    time.sleep(params["post_fail_cooldown"])
+                    break
+
                 if pointer_lost:
-                    # 收杆循环结束后，等待 params["reel_end_wait"] 秒，短按左键 params["short_press_time"] 秒，再立即进入下一轮抛竿
+                    bite_detection_enabled = False  # 🚫 确保收杆完成后关闭
+                    last_reel_success_time = time.time()  # ⬅️ 新增：开始冷却计时
+                    # 成功收杆：旧逻辑保持
                     time.sleep(params["reel_end_wait"])
-                    print(f"收杆结束后短按左键{params['short_press_time']}秒")
+                    print(f"收杆结束后短按左键 {params['short_press_time']} 秒")
                     pyautogui.mouseDown()
                     time.sleep(params["short_press_time"])
                     pyautogui.mouseUp()
                     time.sleep(params["next_cast_sleep"])
-                    # 立即进入下一轮抛竿（跳出收杆循环，回到主循环）
                     break
 
                 if no_pointer_time is not None and (now - no_pointer_time > 1.0):
@@ -331,6 +394,9 @@ def automation_loop(ui_handle):
         automation_running = False
         stop_requested = False
         ui_handle.set_last_action("Automation stopped")
+
+
+
 
 # ---------- UI 类 ----------
 class FishingUI:
@@ -369,12 +435,14 @@ class FishingUI:
         cast_frame.grid(row=0, column=0, padx=5, pady=5, sticky="n")
         add_param(cast_frame, "cast_hold_time", "抛竿时长(s)", 0)
         add_param(cast_frame, "post_cast_wait", "抛竿后等待(s)", 1)
+        add_param(cast_frame, "cast_adjust_a_time", "按A时长(s)", 2)
 
         # 等上钩时参数
         bite_frame = tk.LabelFrame(param_frame, text="等上钩时", padx=5, pady=5)
         bite_frame.grid(row=0, column=1, padx=5, pady=5, sticky="n")
-        add_param(bite_frame, "bite_threshold", "上钩阈值", 0)
         add_param(bite_frame, "max_bite_wait", "上钩等待(s)", 1)
+        add_param(bite_frame, "bite_diff_threshold", "差分阈值", 2)
+        add_param(bite_frame, "bite_confirm_frames", "确认帧数", 3)
 
         # 收杆时参数
         reel_frame = tk.LabelFrame(param_frame, text="收杆时", padx=5, pady=5)
@@ -382,6 +450,8 @@ class FishingUI:
         add_param(reel_frame, "pointer_loss_time", "指针丢失(s)", 0)
         add_param(reel_frame, "release_angle", "松开角度", 1)
         add_param(reel_frame, "release_speed", "松开速度", 2)
+        add_param(reel_frame, "max_reel_time", "最长收杆(s)", 3)  # ⬅️ 新增
+        add_param(reel_frame, "post_fail_cooldown", "失败冷却(s)", 4)  # ⬅️ 新增
 
         # 收杆后参数
         post_reel_frame = tk.LabelFrame(param_frame, text="收杆后", padx=5, pady=5)
@@ -517,10 +587,13 @@ class FishingUI:
 
     def set_bite_region(self):
         """设置咬钩检测区域"""
-        global bite_region
+        global bite_region, last_bite_gray, bite_change_count
         new_region = select_region_via_drag()
         if new_region:
             bite_region = new_region
+            last_bite_gray = None  # 重置自动化检测状态
+            bite_change_count = 0
+            self.ui_prev_bite_gray = None  # 新增：重置UI预览的上一帧
             messagebox.showinfo("成功", f"咬钩区域已更新为: {bite_region}")
         else:
             messagebox.showwarning("取消", "未更新咬钩区域")
@@ -528,29 +601,20 @@ class FishingUI:
     # ---------- detection loop (UI) ----------
     def _loop_detect(self):
         # 1) grab frame, detect pointer, update angle/speed display and images
-        frame = np.array(sct.grab(pointer_region))[:, :, :3]
+        frame = np.array(sct.grab(pointer_region))[:, :, :3].copy()
         angle, annotated, mask = detect_pointer_angle_and_annotate(frame, ui_handle=self)
 
-        # 咬钩检测可视化
-        bite_frame = np.array(sct.grab(bite_region))[:, :, :3]
-        bite_frame = cv2.cvtColor(bite_frame, cv2.COLOR_BGRA2BGR)  # 确保为 BGR 格式
+        # 咬钩检测可视化（鱼饵差分预览）
+        bite_frame = np.array(sct.grab(bite_region))[:, :, :3].copy()
         gray_bite = cv2.cvtColor(bite_frame, cv2.COLOR_BGR2GRAY)
-        bite_template = cv2.imread("bite_template.png", cv2.IMREAD_GRAYSCALE)
-        if bite_template is not None:
-            # 咬钩模板进行多级缩放处理
-            scaled_templates = [
-                cv2.resize(bite_template, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-                for scale in np.arange(0.5, 3.5, 0.5)  # 从 50% 到 300%，每 50% 一个模板
-            ]
-            bite_detected = False
-            for tpl in scaled_templates:
-                res = cv2.matchTemplate(gray_bite, tpl, cv2.TM_CCOEFF_NORMED)
-                if np.max(res) >= 0.78:  # 阈值可调
-                    bite_detected = True
-                    break
-            if bite_detected:
-                print("咬钩检测到！")
-                cv2.putText(bite_frame, "Bite Detected!", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+
+        # 和上一帧对比，展示差分分数
+        if getattr(self, "ui_prev_bite_gray", None) is None:
+            diff_score = 0.0
+        else:
+            diff = cv2.absdiff(self.ui_prev_bite_gray, gray_bite)
+            diff_score = float(np.mean(diff))
+        self.ui_prev_bite_gray = gray_bite  # 更新UI的上一帧
 
         now = time.time()
         speed_txt = "-"
@@ -558,20 +622,21 @@ class FishingUI:
             dt = now - self.prev_time if now - self.prev_time > 1e-6 else 1e-6
             sp = (self.prev_angle - angle) / dt
             self.current_speed = sp
-            speed_txt = f"{sp:.2f} 度/秒"  # 改为中文
+            speed_txt = f"{sp:.2f} 度/秒"
         elif self.current_speed is not None:
-            speed_txt = f"{self.current_speed:.2f} 度/秒"  # 改为中文
+            speed_txt = f"{self.current_speed:.2f} 度/秒"
 
         angle_txt = f"{angle:.2f}" if angle is not None else "-"
-
-        status = "自动钓鱼运行中" if automation_running else "空闲"  # 改为中文
-        self.info_label.config(text=f"角度: {angle_txt} , 速度: {speed_txt} , 状态: {status}")  # 改为中文
+        status = "自动钓鱼运行中" if automation_running else "空闲"
+        if automation_running:
+            status += " | 咬钩检测: ON" if bite_detection_enabled else " | 咬钩检测: OFF"
+        self.info_label.config(text=f"角度: {angle_txt} , 速度: {speed_txt} , 状态: {status}")
 
         # show annotated frame
         try:
             rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
-            img = img.resize((int(pointer_region["width"]*1.2), int(pointer_region["height"]*1.2)))
+            img = img.resize((int(pointer_region["width"] * 1.2), int(pointer_region["height"] * 1.2)))
             imgtk = ImageTk.PhotoImage(image=img)
             self.img_label.imgtk = imgtk
             self.img_label.config(image=imgtk)
@@ -583,14 +648,14 @@ class FishingUI:
             if mask is not None:
                 mvis = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
                 mvis = Image.fromarray(mvis)
-                mvis = mvis.resize((int(pointer_region["width"]*1.2), int(pointer_region["height"]*1.2)))
+                mvis = mvis.resize((int(pointer_region["width"] * 1.2), int(pointer_region["height"] * 1.2)))
                 mtk = ImageTk.PhotoImage(image=mvis)
                 self.mask_label.imgtk = mtk
                 self.mask_label.config(image=mtk)
         except Exception:
             pass
 
-        # 显示咬钩检测区域
+        # 显示咬钩区域（纯图像，不再写字）
         try:
             rgb_bite = cv2.cvtColor(bite_frame, cv2.COLOR_BGR2RGB)
             img_bite = Image.fromarray(rgb_bite)
@@ -611,6 +676,7 @@ class FishingUI:
         else:
             self._after_id = None
 
+
 # ---------- main ----------
 def main():
     root = tk.Tk()
@@ -620,8 +686,9 @@ def main():
                " - 按键 '1' 启动/停止自动钓鱼 (也可点击启动自动钓鱼)\n"
                " - 按键 '2' 手动触发“有鱼”事件（会被自动钓鱼线程消费）\n"
                " - 按键 '3' 立即停止自动钓鱼\n"
-               " - 如果需要自动检测感叹号（咬钩），请用“设置咬钩区域”选区并将模板命名为 bite_template.png\n"
-               " - 调节参数后建议先“开始检测”观察识别效果，再启用自动钓鱼\n")  # 全部改为中文
+               " - 请用“设置咬钩区域”选取【鱼饵数字】所在的小区域，系统将通过灰度差分来判定是否咬钩\n"
+               " - 调节参数后建议先“开始检测”，观察Diff分数与阈值，再启用自动钓鱼\n")
+
     print(message)
     root.mainloop()
     keyboard.unhook_all_hotkeys()  # 程序退出时清理
